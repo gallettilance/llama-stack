@@ -65,6 +65,18 @@ async def list_mcp_tools(endpoint: str, headers: dict[str, str]) -> ListToolDefs
                         description=param_schema.get("description", ""),
                     )
                 )
+            annotations = {}
+            print(tool.annotations)
+            if tool.annotations is not None:
+                print(tool.annotations)
+                print(tool.annotations.destructiveHint)
+                annotations = {
+                    "title": tool.annotations.title,
+                    "readOnlyHint": tool.annotations.readOnlyHint,
+                    "destructiveHint": tool.annotations.destructiveHint,
+                    "idempotentHint": tool.annotations.idempotentHint,
+                    "openWorldHint": tool.annotations.openWorldHint,
+                }
             tools.append(
                 ToolDef(
                     name=tool.name,
@@ -73,8 +85,11 @@ async def list_mcp_tools(endpoint: str, headers: dict[str, str]) -> ListToolDefs
                     metadata={
                         "endpoint": endpoint,
                     },
+                    annotations=annotations,
                 )
             )
+        for tool in tools:
+            print(tool.annotations)
     return ListToolDefsResponse(data=tools)
 
 

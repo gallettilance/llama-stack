@@ -34,6 +34,7 @@ class Tool(Resource):
     description: str
     parameters: list[ToolParameter]
     metadata: dict[str, Any] | None = None
+    annotations: dict[str, Any] | None = None
 
 
 @json_schema_type
@@ -42,6 +43,7 @@ class ToolDef(BaseModel):
     description: str | None = None
     parameters: list[ToolParameter] | None = None
     metadata: dict[str, Any] | None = None
+    annotations: dict[str, Any] | None = None
 
 
 @json_schema_type
