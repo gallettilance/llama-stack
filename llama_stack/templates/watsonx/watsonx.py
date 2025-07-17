@@ -6,7 +6,7 @@
 
 from pathlib import Path
 
-from llama_stack.apis.models.models import ModelType
+from llama_stack.apis.models import ModelType
 from llama_stack.distribution.datatypes import ModelInput, Provider, ToolGroupInput
 from llama_stack.providers.inline.inference.sentence_transformers import (
     SentenceTransformersInferenceConfig,
@@ -69,7 +69,7 @@ def get_distribution_template() -> DistributionTemplate:
         },
     )
 
-    default_models = get_model_registry(available_models)
+    default_models, _ = get_model_registry(available_models)
     return DistributionTemplate(
         name="watsonx",
         distro_type="remote_hosted",

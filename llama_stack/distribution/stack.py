@@ -98,6 +98,26 @@ async def register_resources(run_config: StackRunConfig, impls: dict[Api, Any]):
 
         method = getattr(impls[api], register_method)
         for obj in objects:
+            logger.debug(f"registering {rsrc.capitalize()} {obj} for provider {obj.provider_id}")
+            # Do not register models on disabled providers
+            if hasattr(obj, "provider_id") and obj.provider_id is not None and obj.provider_id == "__disabled__":
+                logger.debug(f"Skipping {rsrc.capitalize()} registration for disabled provider.")
+                continue
+            # In complex templates, like our starter template, we may have dynamic model ids
+            # given by environment variables. This allows those environment variables to have
+            # a default value of __disabled__ to skip registration of the model if not set.
+            if (
+                hasattr(obj, "provider_model_id")
+                and obj.provider_model_id is not None
+                and "__disabled__" in obj.provider_model_id
+            ):
+                logger.debug(f"Skipping {rsrc.capitalize()} registration for disabled model.")
+                continue
+
+            if hasattr(obj, "shield_id") and obj.shield_id is not None and obj.shield_id == "__disabled__":
+                logger.debug(f"Skipping {rsrc.capitalize()} registration for disabled shield.")
+                continue
+
             # we want to maintain the type information in arguments to method.
             # instead of method(**obj.model_dump()), which may convert a typed attr to a dict,
             # we use model_dump() to find all the attrs and then getattr to get the still typed value.
@@ -118,7 +138,12 @@ class EnvVarError(Exception):
     def __init__(self, var_name: str, path: str = ""):
         self.var_name = var_name
         self.path = path
-        super().__init__(f"Environment variable '{var_name}' not set or empty{f' at {path}' if path else ''}")
+        super().__init__(
+            f"Environment variable '{var_name}' not set or empty {f'at {path}' if path else ''}. "
+            f"Use ${{env.{var_name}:=default_value}} to provide a default value, "
+            f"${{env.{var_name}:+value_if_set}} to make the field conditional, "
+            f"or ensure the environment variable is set."
+        )
 
 
 def replace_env_vars(config: Any, path: str = "") -> Any:
@@ -135,35 +160,67 @@ def replace_env_vars(config: Any, path: str = "") -> Any:
         result = []
         for i, v in enumerate(config):
             try:
+                # Special handling for providers: first resolve the provider_id to check if provider
+                # is disabled so that we can skip config env variable expansion and avoid validation errors
+                if isinstance(v, dict) and "provider_id" in v:
+                    try:
+                        resolved_provider_id = replace_env_vars(v["provider_id"], f"{path}[{i}].provider_id")
+                        if resolved_provider_id == "__disabled__":
+                            logger.debug(
+                                f"Skipping config env variable expansion for disabled provider: {v.get('provider_id', '')}"
+                            )
+                            # Create a copy with resolved provider_id but original config
+                            disabled_provider = v.copy()
+                            disabled_provider["provider_id"] = resolved_provider_id
+                            result.append(disabled_provider)
+                            continue
+                    except EnvVarError:
+                        # If we can't resolve the provider_id, continue with normal processing
+                        pass
+
+                # Normal processing for non-disabled providers
                 result.append(replace_env_vars(v, f"{path}[{i}]"))
             except EnvVarError as e:
                 raise EnvVarError(e.var_name, e.path) from None
         return result
 
     elif isinstance(config, str):
-        # Updated pattern to support both default values (:) and conditional values (+)
-        pattern = r"\${env\.([A-Z0-9_]+)(?:([:\+])([^}]*))?}"
+        # Pattern supports bash-like syntax: := for default and :+ for conditional and a optional value
+        pattern = r"\${env\.([A-Z0-9_]+)(?::([=+])([^}]*))?}"
 
-        def get_env_var(match):
+        def get_env_var(match: re.Match):
             env_var = match.group(1)
-            operator = match.group(2)  # ':' for default, '+' for conditional
+            operator = match.group(2)  # '=' for default, '+' for conditional
             value_expr = match.group(3)
 
             env_value = os.environ.get(env_var)
 
-            if operator == ":":  # Default value syntax: ${env.FOO:default}
-                if not env_value:
-                    if value_expr is None:
-                        raise EnvVarError(env_var, path)
+            if operator == "=":  # Default value syntax: ${env.FOO:=default}
+                # If the env is set like ${env.FOO:=default} then use the env value when set
+                if env_value:
+                    value = env_value
+                else:
+                    # If the env is not set, look for a default value
+                    # value_expr returns empty string (not None) when not matched
+                    # This means ${env.FOO:=} and it's accepted and returns empty string - just like bash
+                    if value_expr == "":
+                        return ""
                     else:
                         value = value_expr
-                else:
-                    value = env_value
-            elif operator == "+":  # Conditional value syntax: ${env.FOO+value_if_set}
+
+            elif operator == "+":  # Conditional value syntax: ${env.FOO:+value_if_set}
+                # If the env is set like ${env.FOO:+value_if_set} then use the value_if_set
                 if env_value:
-                    value = value_expr
+                    if value_expr:
+                        value = value_expr
+                    # This means ${env.FOO:+}
+                    else:
+                        # Just like bash, this doesn't care whether the env is set or not and applies
+                        # the value, in this case the empty string
+                        return ""
                 else:
-                    # If env var is not set, return empty string for the conditional case
+                    # Just like bash, this doesn't care whether the env is set or not, since it's not set
+                    # we return an empty string
                     value = ""
             else:  # No operator case: ${env.FOO}
                 if not env_value:
@@ -174,11 +231,47 @@ def replace_env_vars(config: Any, path: str = "") -> Any:
             return os.path.expanduser(value)
 
         try:
-            return re.sub(pattern, get_env_var, config)
+            result = re.sub(pattern, get_env_var, config)
+            return _convert_string_to_proper_type(result)
         except EnvVarError as e:
             raise EnvVarError(e.var_name, e.path) from None
 
     return config
+
+
+def _convert_string_to_proper_type(value: str) -> Any:
+    # This might be tricky depending on what the config type is, if  'str | None' we are
+    # good, if 'str' we need to keep the empty string... 'str | None' is more common and
+    # providers config should be typed this way.
+    # TODO: we could try to load the config class and see if the config has a field with type 'str | None'
+    # and then convert the empty string to None or not
+    if value == "":
+        return None
+
+    lowered = value.lower()
+    if lowered == "true":
+        return True
+    elif lowered == "false":
+        return False
+
+    try:
+        return int(value)
+    except ValueError:
+        pass
+
+    try:
+        return float(value)
+    except ValueError:
+        pass
+
+    return value
+
+
+def cast_image_name_to_string(config_dict: dict[str, Any]) -> dict[str, Any]:
+    """Ensure that any value for a key 'image_name' in a config_dict is a string"""
+    if "image_name" in config_dict and config_dict["image_name"] is not None:
+        config_dict["image_name"] = str(config_dict["image_name"])
+    return config_dict
 
 
 def validate_env_pair(env_pair: str) -> tuple[str, str]:

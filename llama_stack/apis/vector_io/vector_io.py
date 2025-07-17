@@ -8,6 +8,7 @@
 #
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
+import uuid
 from typing import Annotated, Any, Literal, Protocol, runtime_checkable
 
 from pydantic import BaseModel, Field
@@ -15,21 +16,80 @@ from pydantic import BaseModel, Field
 from llama_stack.apis.inference import InterleavedContent
 from llama_stack.apis.vector_dbs import VectorDB
 from llama_stack.providers.utils.telemetry.trace_protocol import trace_protocol
+from llama_stack.providers.utils.vector_io.chunk_utils import generate_chunk_id
 from llama_stack.schema_utils import json_schema_type, webmethod
 from llama_stack.strong_typing.schema import register_schema
 
 
+@json_schema_type
+class ChunkMetadata(BaseModel):
+    """
+    `ChunkMetadata` is backend metadata for a `Chunk` that is used to store additional information about the chunk that
+        will not be used in the context during inference, but is required for backend functionality. The `ChunkMetadata`
+        is set during chunk creation in `MemoryToolRuntimeImpl().insert()`and is not expected to change after.
+        Use `Chunk.metadata` for metadata that will be used in the context during inference.
+    :param chunk_id: The ID of the chunk. If not set, it will be generated based on the document ID and content.
+    :param document_id: The ID of the document this chunk belongs to.
+    :param source: The source of the content, such as a URL, file path, or other identifier.
+    :param created_timestamp: An optional timestamp indicating when the chunk was created.
+    :param updated_timestamp: An optional timestamp indicating when the chunk was last updated.
+    :param chunk_window: The window of the chunk, which can be used to group related chunks together.
+    :param chunk_tokenizer: The tokenizer used to create the chunk. Default is Tiktoken.
+    :param chunk_embedding_model: The embedding model used to create the chunk's embedding.
+    :param chunk_embedding_dimension: The dimension of the embedding vector for the chunk.
+    :param content_token_count: The number of tokens in the content of the chunk.
+    :param metadata_token_count: The number of tokens in the metadata of the chunk.
+    """
+
+    chunk_id: str | None = None
+    document_id: str | None = None
+    source: str | None = None
+    created_timestamp: int | None = None
+    updated_timestamp: int | None = None
+    chunk_window: str | None = None
+    chunk_tokenizer: str | None = None
+    chunk_embedding_model: str | None = None
+    chunk_embedding_dimension: int | None = None
+    content_token_count: int | None = None
+    metadata_token_count: int | None = None
+
+
+@json_schema_type
 class Chunk(BaseModel):
     """
     A chunk of content that can be inserted into a vector database.
     :param content: The content of the chunk, which can be interleaved text, images, or other types.
     :param embedding: Optional embedding for the chunk. If not provided, it will be computed later.
-    :param metadata: Metadata associated with the chunk, such as document ID, source, or other relevant information.
+    :param metadata: Metadata associated with the chunk that will be used in the model context during inference.
+    :param stored_chunk_id: The chunk ID that is stored in the vector database. Used for backend functionality.
+    :param chunk_metadata: Metadata for the chunk that will NOT be used in the context during inference.
+        The `chunk_metadata` is required backend functionality.
     """
 
     content: InterleavedContent
     metadata: dict[str, Any] = Field(default_factory=dict)
     embedding: list[float] | None = None
+    # The alias parameter serializes the field as "chunk_id" in JSON but keeps the internal name as "stored_chunk_id"
+    stored_chunk_id: str | None = Field(default=None, alias="chunk_id")
+    chunk_metadata: ChunkMetadata | None = None
+
+    model_config = {"populate_by_name": True}
+
+    def model_post_init(self, __context):
+        # Extract chunk_id from metadata if present
+        if self.metadata and "chunk_id" in self.metadata:
+            self.stored_chunk_id = self.metadata.pop("chunk_id")
+
+    @property
+    def chunk_id(self) -> str:
+        """Returns the chunk ID, which is either an input `chunk_id` or a generated one if not set."""
+        if self.stored_chunk_id:
+            return self.stored_chunk_id
+
+        if "document_id" in self.metadata:
+            return generate_chunk_id(self.metadata["document_id"], str(self.content))
+
+        return generate_chunk_id(str(uuid.uuid4()), str(self.content))
 
 
 @json_schema_type
@@ -286,7 +346,6 @@ class VectorIO(Protocol):
         embedding_model: str | None = None,
         embedding_dimension: int | None = 384,
         provider_id: str | None = None,
-        provider_vector_db_id: str | None = None,
     ) -> VectorStoreObject:
         """Creates a vector store.
 
@@ -298,7 +357,6 @@ class VectorIO(Protocol):
         :param embedding_model: The embedding model to use for this vector store.
         :param embedding_dimension: The dimension of the embedding vectors (default: 384).
         :param provider_id: The ID of the provider to use for this vector store.
-        :param provider_vector_db_id: The provider-specific vector database ID.
         :returns: A VectorStoreObject representing the created vector store.
         """
         ...
@@ -372,6 +430,7 @@ class VectorIO(Protocol):
         max_num_results: int | None = 10,
         ranking_options: SearchRankingOptions | None = None,
         rewrite_query: bool | None = False,
+        search_mode: str | None = "vector",  # Using str instead of Literal due to OpenAPI schema generator limitations
     ) -> VectorStoreSearchResponsePage:
         """Search for chunks in a vector store.
 
@@ -383,6 +442,7 @@ class VectorIO(Protocol):
         :param max_num_results: Maximum number of results to return (1 to 50 inclusive, default 10).
         :param ranking_options: Ranking options for fine-tuning the search results.
         :param rewrite_query: Whether to rewrite the natural language query for vector search (default false)
+        :param search_mode: The search mode to use - "keyword", "vector", or "hybrid" (default "vector")
         :returns: A VectorStoreSearchResponse containing the search results.
         """
         ...

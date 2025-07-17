@@ -5,11 +5,11 @@
 # the root directory of this source tree.
 
 
+import base64
 import uuid
 from collections.abc import AsyncGenerator, AsyncIterator
 from typing import Any
 
-import httpx
 from ollama import AsyncClient  # type: ignore[attr-defined]
 from openai import AsyncOpenAI
 
@@ -19,6 +19,7 @@ from llama_stack.apis.common.content_types import (
     InterleavedContentItem,
     TextContentItem,
 )
+from llama_stack.apis.common.errors import UnsupportedModelError
 from llama_stack.apis.inference import (
     ChatCompletionRequest,
     ChatCompletionResponse,
@@ -33,6 +34,13 @@ from llama_stack.apis.inference import (
     JsonSchemaResponseFormat,
     LogProbConfig,
     Message,
+    OpenAIChatCompletion,
+    OpenAIChatCompletionChunk,
+    OpenAICompletion,
+    OpenAIEmbeddingsResponse,
+    OpenAIEmbeddingUsage,
+    OpenAIMessageParam,
+    OpenAIResponseFormatParam,
     ResponseFormat,
     SamplingParams,
     TextTruncation,
@@ -41,15 +49,6 @@ from llama_stack.apis.inference import (
     ToolDefinition,
     ToolPromptFormat,
 )
-from llama_stack.apis.inference.inference import (
-    OpenAIChatCompletion,
-    OpenAIChatCompletionChunk,
-    OpenAICompletion,
-    OpenAIEmbeddingsResponse,
-    OpenAIEmbeddingUsage,
-    OpenAIMessageParam,
-    OpenAIResponseFormatParam,
-)
 from llama_stack.apis.models import Model, ModelType
 from llama_stack.log import get_logger
 from llama_stack.providers.datatypes import (
@@ -57,6 +56,7 @@ from llama_stack.providers.datatypes import (
     HealthStatus,
     ModelsProtocolPrivate,
 )
+from llama_stack.providers.remote.inference.ollama.config import OllamaImplConfig
 from llama_stack.providers.utils.inference.model_registry import (
     ModelRegistryHelper,
 )
@@ -78,6 +78,7 @@ from llama_stack.providers.utils.inference.prompt_adapter import (
     content_has_media,
     convert_image_content_to_url,
     interleaved_content_as_str,
+    localize_image_content,
     request_has_media,
 )
 
@@ -90,9 +91,9 @@ class OllamaInferenceAdapter(
     InferenceProvider,
     ModelsProtocolPrivate,
 ):
-    def __init__(self, url: str) -> None:
+    def __init__(self, config: OllamaImplConfig) -> None:
         self.register_helper = ModelRegistryHelper(MODEL_ENTRIES)
-        self.url = url
+        self.url = config.url
 
     @property
     def client(self) -> AsyncClient:
@@ -103,8 +104,10 @@ class OllamaInferenceAdapter(
         return AsyncOpenAI(base_url=f"{self.url}/v1", api_key="ollama")
 
     async def initialize(self) -> None:
-        logger.info(f"checking connectivity to Ollama at `{self.url}`...")
-        await self.health()
+        logger.debug(f"checking connectivity to Ollama at `{self.url}`...")
+        health_response = await self.health()
+        if health_response["status"] == HealthStatus.ERROR:
+            raise RuntimeError("Ollama Server is not running, start it using `ollama serve` in a separate terminal")
 
     async def health(self) -> HealthResponse:
         """
@@ -117,10 +120,8 @@ class OllamaInferenceAdapter(
         try:
             await self.client.ps()
             return HealthResponse(status=HealthStatus.OK)
-        except httpx.ConnectError as e:
-            raise RuntimeError(
-                "Ollama Server is not running, start it using `ollama serve` in a separate terminal"
-            ) from e
+        except Exception as e:
+            return HealthResponse(status=HealthStatus.ERROR, message=f"Health check failed: {str(e)}")
 
     async def shutdown(self) -> None:
         pass
@@ -374,9 +375,7 @@ class OllamaInferenceAdapter(
                     f"Imprecise provider resource id was used but 'latest' is available in Ollama - using '{model.provider_resource_id}:latest'"
                 )
                 return model
-            raise ValueError(
-                f"Model '{model.provider_resource_id}' is not available in Ollama. Available models: {', '.join(available_models)}"
-            )
+            raise UnsupportedModelError(model.provider_resource_id, available_models)
         model.provider_resource_id = provider_resource_id
 
         return model
@@ -495,6 +494,21 @@ class OllamaInferenceAdapter(
         user: str | None = None,
     ) -> OpenAIChatCompletion | AsyncIterator[OpenAIChatCompletionChunk]:
         model_obj = await self._get_model(model)
+
+        # Ollama does not support image urls, so we need to download the image and convert it to base64
+        async def _convert_message(m: OpenAIMessageParam) -> OpenAIMessageParam:
+            if isinstance(m.content, list):
+                for c in m.content:
+                    if c.type == "image_url" and c.image_url and c.image_url.url:
+                        localize_result = await localize_image_content(c.image_url.url)
+                        if localize_result is None:
+                            raise ValueError(f"Failed to localize image content from {c.image_url.url}")
+
+                        content, format = localize_result
+                        c.image_url.url = f"data:image/{format};base64,{base64.b64encode(content).decode('utf-8')}"
+            return m
+
+        messages = [await _convert_message(m) for m in messages]
         params = await prepare_openai_completion_params(
             model=model_obj.provider_resource_id,
             messages=messages,

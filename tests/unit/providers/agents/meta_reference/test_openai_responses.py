@@ -27,8 +27,9 @@ from llama_stack.apis.agents.openai_responses import (
     OpenAIResponseOutputMessageWebSearchToolCall,
     OpenAIResponseText,
     OpenAIResponseTextFormat,
+    WebSearchToolTypes,
 )
-from llama_stack.apis.inference.inference import (
+from llama_stack.apis.inference import (
     OpenAIAssistantMessageParam,
     OpenAIChatCompletionContentPartTextParam,
     OpenAIDeveloperMessageParam,
@@ -121,7 +122,6 @@ async def fake_stream(fixture: str = "simple_chat_completion.yaml"):
     )
 
 
-@pytest.mark.asyncio
 async def test_create_openai_response_with_string_input(openai_responses_impl, mock_inference_api):
     """Test creating an OpenAI response with a simple string input."""
     # Setup
@@ -154,17 +154,11 @@ async def test_create_openai_response_with_string_input(openai_responses_impl, m
     assert result.output[0].content[0].text == "Dublin"
 
 
-@pytest.mark.asyncio
 async def test_create_openai_response_with_string_input_with_tools(openai_responses_impl, mock_inference_api):
     """Test creating an OpenAI response with a simple string input and tools."""
     # Setup
     input_text = "What is the capital of Ireland?"
     model = "meta-llama/Llama-3.1-8B-Instruct"
-
-    mock_inference_api.openai_chat_completion.side_effect = [
-        fake_stream("tool_call_completion.yaml"),
-        fake_stream(),
-    ]
 
     openai_responses_impl.tool_groups_api.get_tool.return_value = Tool(
         identifier="web_search",
@@ -182,42 +176,52 @@ async def test_create_openai_response_with_string_input_with_tools(openai_respon
     )
 
     # Execute
-    result = await openai_responses_impl.create_openai_response(
-        input=input_text,
-        model=model,
-        temperature=0.1,
-        tools=[
-            OpenAIResponseInputToolWebSearch(
-                name="web_search",
-            )
-        ],
-    )
+    for tool_name in WebSearchToolTypes:
+        # Reset mock states as we loop through each tool type
+        mock_inference_api.openai_chat_completion.side_effect = [
+            fake_stream("tool_call_completion.yaml"),
+            fake_stream(),
+        ]
+        openai_responses_impl.tool_groups_api.get_tool.reset_mock()
+        openai_responses_impl.tool_runtime_api.invoke_tool.reset_mock()
+        openai_responses_impl.responses_store.store_response_object.reset_mock()
 
-    # Verify
-    first_call = mock_inference_api.openai_chat_completion.call_args_list[0]
-    assert first_call.kwargs["messages"][0].content == "What is the capital of Ireland?"
-    assert first_call.kwargs["tools"] is not None
-    assert first_call.kwargs["temperature"] == 0.1
+        result = await openai_responses_impl.create_openai_response(
+            input=input_text,
+            model=model,
+            temperature=0.1,
+            tools=[
+                OpenAIResponseInputToolWebSearch(
+                    name=tool_name,
+                )
+            ],
+        )
 
-    second_call = mock_inference_api.openai_chat_completion.call_args_list[1]
-    assert second_call.kwargs["messages"][-1].content == "Dublin"
-    assert second_call.kwargs["temperature"] == 0.1
+        # Verify
+        first_call = mock_inference_api.openai_chat_completion.call_args_list[0]
+        assert first_call.kwargs["messages"][0].content == "What is the capital of Ireland?"
+        assert first_call.kwargs["tools"] is not None
+        assert first_call.kwargs["temperature"] == 0.1
 
-    openai_responses_impl.tool_groups_api.get_tool.assert_called_once_with("web_search")
-    openai_responses_impl.tool_runtime_api.invoke_tool.assert_called_once_with(
-        tool_name="web_search",
-        kwargs={"query": "What is the capital of Ireland?"},
-    )
+        second_call = mock_inference_api.openai_chat_completion.call_args_list[1]
+        assert second_call.kwargs["messages"][-1].content == "Dublin"
+        assert second_call.kwargs["temperature"] == 0.1
 
-    openai_responses_impl.responses_store.store_response_object.assert_called_once()
+        openai_responses_impl.tool_groups_api.get_tool.assert_called_once_with("web_search")
+        openai_responses_impl.tool_runtime_api.invoke_tool.assert_called_once_with(
+            tool_name="web_search",
+            kwargs={"query": "What is the capital of Ireland?"},
+        )
 
-    # Check that we got the content from our mocked tool execution result
-    assert len(result.output) >= 1
-    assert isinstance(result.output[1], OpenAIResponseMessage)
-    assert result.output[1].content[0].text == "Dublin"
+        openai_responses_impl.responses_store.store_response_object.assert_called_once()
+
+        # Check that we got the content from our mocked tool execution result
+        assert len(result.output) >= 1
+        assert isinstance(result.output[1], OpenAIResponseMessage)
+        assert result.output[1].content[0].text == "Dublin"
+        assert result.output[1].content[0].annotations == []
 
 
-@pytest.mark.asyncio
 async def test_create_openai_response_with_tool_call_type_none(openai_responses_impl, mock_inference_api):
     """Test creating an OpenAI response with a tool call response that has a type of None."""
     # Setup
@@ -287,7 +291,6 @@ async def test_create_openai_response_with_tool_call_type_none(openai_responses_
     assert chunks[1].response.output[0].name == "get_weather"
 
 
-@pytest.mark.asyncio
 async def test_create_openai_response_with_multiple_messages(openai_responses_impl, mock_inference_api):
     """Test creating an OpenAI response with multiple messages."""
     # Setup
@@ -333,7 +336,6 @@ async def test_create_openai_response_with_multiple_messages(openai_responses_im
             assert isinstance(inference_messages[i], OpenAIDeveloperMessageParam)
 
 
-@pytest.mark.asyncio
 async def test_prepend_previous_response_none(openai_responses_impl):
     """Test prepending no previous response to a new response."""
 
@@ -341,7 +343,6 @@ async def test_prepend_previous_response_none(openai_responses_impl):
     assert input == "fake_input"
 
 
-@pytest.mark.asyncio
 async def test_prepend_previous_response_basic(openai_responses_impl, mock_responses_store):
     """Test prepending a basic previous response to a new response."""
 
@@ -381,7 +382,6 @@ async def test_prepend_previous_response_basic(openai_responses_impl, mock_respo
     assert input[2].content == "fake_input"
 
 
-@pytest.mark.asyncio
 async def test_prepend_previous_response_web_search(openai_responses_impl, mock_responses_store):
     """Test prepending a web search previous response to a new response."""
     input_item_message = OpenAIResponseMessage(
@@ -427,7 +427,6 @@ async def test_prepend_previous_response_web_search(openai_responses_impl, mock_
     assert input[3].content == "fake_input"
 
 
-@pytest.mark.asyncio
 async def test_create_openai_response_with_instructions(openai_responses_impl, mock_inference_api):
     # Setup
     input_text = "What is the capital of Ireland?"
@@ -456,7 +455,6 @@ async def test_create_openai_response_with_instructions(openai_responses_impl, m
     assert sent_messages[1].content == input_text
 
 
-@pytest.mark.asyncio
 async def test_create_openai_response_with_instructions_and_multiple_messages(
     openai_responses_impl, mock_inference_api
 ):
@@ -501,7 +499,6 @@ async def test_create_openai_response_with_instructions_and_multiple_messages(
     assert sent_messages[3].content == "Which is the largest?"
 
 
-@pytest.mark.asyncio
 async def test_create_openai_response_with_instructions_and_previous_response(
     openai_responses_impl, mock_responses_store, mock_inference_api
 ):
@@ -558,7 +555,6 @@ async def test_create_openai_response_with_instructions_and_previous_response(
     assert sent_messages[3].content == "Which is the largest?"
 
 
-@pytest.mark.asyncio
 async def test_list_openai_response_input_items_delegation(openai_responses_impl, mock_responses_store):
     """Test that list_openai_response_input_items properly delegates to responses_store with correct parameters."""
     # Setup
@@ -594,7 +590,6 @@ async def test_list_openai_response_input_items_delegation(openai_responses_impl
     assert result.data[0].id == "msg_123"
 
 
-@pytest.mark.asyncio
 async def test_responses_store_list_input_items_logic():
     """Test ResponsesStore list_response_input_items logic - mocks get_response_object to test actual ordering/limiting."""
 
@@ -673,7 +668,6 @@ async def test_responses_store_list_input_items_logic():
     assert len(result.data) == 0  # Should return no items
 
 
-@pytest.mark.asyncio
 async def test_store_response_uses_rehydrated_input_with_previous_response(
     openai_responses_impl, mock_responses_store, mock_inference_api
 ):
@@ -740,7 +734,6 @@ async def test_store_response_uses_rehydrated_input_with_previous_response(
     assert result.status == "completed"
 
 
-@pytest.mark.asyncio
 @pytest.mark.parametrize(
     "text_format, response_format",
     [
@@ -780,7 +773,6 @@ async def test_create_openai_response_with_text_format(
     assert first_call.kwargs["response_format"] == response_format
 
 
-@pytest.mark.asyncio
 async def test_create_openai_response_with_invalid_text_format(openai_responses_impl, mock_inference_api):
     """Test creating an OpenAI response with an invalid text format."""
     # Setup

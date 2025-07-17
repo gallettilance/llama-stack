@@ -9,6 +9,7 @@ import asyncio
 import functools
 import inspect
 import json
+import logging
 import os
 import ssl
 import sys
@@ -31,7 +32,12 @@ from openai import BadRequestError
 from pydantic import BaseModel, ValidationError
 
 from llama_stack.apis.common.responses import PaginatedResponse
-from llama_stack.distribution.datatypes import AuthenticationRequiredError, LoggingConfig, StackRunConfig
+from llama_stack.distribution.access_control.access_control import AccessDeniedError
+from llama_stack.distribution.datatypes import (
+    AuthenticationRequiredError,
+    LoggingConfig,
+    StackRunConfig,
+)
 from llama_stack.distribution.distribution import builtin_automatically_routed_apis
 from llama_stack.distribution.request_headers import PROVIDER_DATA_VAR, User, request_provider_data_context
 from llama_stack.distribution.resolver import InvalidProviderError
@@ -41,6 +47,7 @@ from llama_stack.distribution.server.routes import (
     initialize_route_impls,
 )
 from llama_stack.distribution.stack import (
+    cast_image_name_to_string,
     construct_stack,
     replace_env_vars,
     validate_env_pair,
@@ -116,7 +123,7 @@ def translate_exception(exc: Exception) -> HTTPException | RequestValidationErro
         return HTTPException(status_code=400, detail=f"Invalid value: {str(exc)}")
     elif isinstance(exc, BadRequestError):
         return HTTPException(status_code=400, detail=str(exc))
-    elif isinstance(exc, PermissionError):
+    elif isinstance(exc, PermissionError | AccessDeniedError):
         return HTTPException(status_code=403, detail=f"Permission denied: {str(exc)}")
     elif isinstance(exc, asyncio.TimeoutError | TimeoutError):
         return HTTPException(status_code=504, detail=f"Operation timed out: {str(exc)}")
@@ -215,7 +222,7 @@ def create_dynamic_typed_route(func: Any, method: str, route: str) -> Callable:
         # Get auth attributes from the request scope
         user_attributes = request.scope.get("user_attributes", {})
         principal = request.scope.get("principal", "")
-        user = User(principal, user_attributes)
+        user = User(principal=principal, attributes=user_attributes)
 
         await log_request_pre_validation(request)
 
@@ -236,7 +243,10 @@ def create_dynamic_typed_route(func: Any, method: str, route: str) -> Callable:
                         result.url = route
                     return result
             except Exception as e:
-                logger.exception(f"Error executing endpoint {route=} {method=}")
+                if logger.isEnabledFor(logging.DEBUG):
+                    logger.exception(f"Error executing endpoint {route=} {method=}")
+                else:
+                    logger.error(f"Error executing endpoint {route=} {method=}: {str(e)}")
                 raise translate_exception(e) from e
 
     sig = inspect.signature(func)
@@ -400,13 +410,13 @@ def main(args: argparse.Namespace | None = None):
         args = parser.parse_args()
 
     log_line = ""
-    if args.config:
+    if hasattr(args, "config") and args.config:
         # if the user provided a config file, use it, even if template was specified
         config_file = Path(args.config)
         if not config_file.exists():
             raise ValueError(f"Config file {config_file} does not exist")
         log_line = f"Using config file: {config_file}"
-    elif args.template:
+    elif hasattr(args, "template") and args.template:
         config_file = Path(REPO_ROOT) / "llama_stack" / "templates" / args.template / "run.yaml"
         if not config_file.exists():
             raise ValueError(f"Template {args.template} does not exist")
@@ -430,13 +440,13 @@ def main(args: argparse.Namespace | None = None):
                     logger.error(f"Error: {str(e)}")
                     sys.exit(1)
         config = replace_env_vars(config_contents)
-        config = StackRunConfig(**config)
+        config = StackRunConfig(**cast_image_name_to_string(config))
 
     # now that the logger is initialized, print the line about which type of config we are using.
     logger.info(log_line)
 
     logger.info("Run configuration:")
-    safe_config = redact_sensitive_fields(config.model_dump())
+    safe_config = redact_sensitive_fields(config.model_dump(mode="json"))
     logger.info(yaml.dump(safe_config, indent=2))
 
     app = FastAPI(
@@ -450,7 +460,7 @@ def main(args: argparse.Namespace | None = None):
 
     # Add authentication middleware if configured
     if config.server.auth:
-        logger.info(f"Enabling authentication with provider: {config.server.auth.provider_type.value}")
+        logger.info(f"Enabling authentication with provider: {config.server.auth.provider_config.type.value}")
         app.add_middleware(AuthenticationMiddleware, auth_config=config.server.auth)
     else:
         if config.server.quota:

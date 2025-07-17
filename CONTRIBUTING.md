@@ -66,13 +66,13 @@ You can install the dependencies by running:
 
 ```bash
 cd llama-stack
-uv sync --extra dev
+uv sync --group dev
 uv pip install -e .
 source .venv/bin/activate
 ```
 
 > [!NOTE]
-> You can use a specific version of Python with `uv` by adding the `--python <version>` flag (e.g. `--python 3.11`)
+> You can use a specific version of Python with `uv` by adding the `--python <version>` flag (e.g. `--python 3.12`)
 > Otherwise, `uv` will automatically select a Python version according to the `requires-python` section of the `pyproject.toml`.
 > For more info, see the [uv docs around Python versions](https://docs.astral.sh/uv/concepts/python-versions/).
 
@@ -112,7 +112,7 @@ uv run pre-commit run --all-files
 
 ## Running tests
 
-You can find the Llama Stack testing documentation here [here](tests/README.md).
+You can find the Llama Stack testing documentation [here](https://github.com/meta-llama/llama-stack/blob/main/tests/README.md).
 
 ## Adding a new dependency to the project
 
@@ -139,6 +139,8 @@ uv sync
   justification for bypassing the check.
 * Don't use unicode characters in the codebase. ASCII-only is preferred for compatibility or
   readability reasons.
+* Providers configuration class should be Pydantic Field class. It should have a `description` field
+  that describes the configuration. These descriptions will be used to generate the provider documentation.
 
 ## Common Tasks
 
@@ -157,10 +159,19 @@ cd llama-stack
 LLAMA_STACK_DIR=$(pwd) LLAMA_STACK_CLIENT_DIR=../llama-stack-client-python llama stack build --template <...>
 ```
 
+### Updating distribution configurations
 
-### Updating Provider Configurations
+If you have made changes to a provider's configuration in any form (introducing a new config key, or
+changing models, etc.), you should run `./scripts/distro_codegen.py` to re-generate various YAML
+files as well as the documentation. You should not change `docs/source/.../distributions/` files
+manually as they are auto-generated.
 
-If you have made changes to a provider's configuration in any form (introducing a new config key, or changing models, etc.), you should run `./scripts/distro_codegen.py` to re-generate various YAML files as well as the documentation. You should not change `docs/source/.../distributions/` files manually as they are auto-generated.
+### Updating the provider documentation
+
+If you have made changes to a provider's configuration, you should run `./scripts/provider_codegen.py`
+to re-generate the documentation. You should not change `docs/source/.../providers/` files manually
+as they are auto-generated.
+Note that the provider "description" field will be used to generate the provider documentation.
 
 ### Building the Documentation
 

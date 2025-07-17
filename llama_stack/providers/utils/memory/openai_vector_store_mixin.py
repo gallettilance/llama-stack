@@ -5,6 +5,7 @@
 # the root directory of this source tree.
 
 import asyncio
+import json
 import logging
 import mimetypes
 import time
@@ -12,24 +13,17 @@ import uuid
 from abc import ABC, abstractmethod
 from typing import Any
 
-from llama_stack.apis.files import Files
-from llama_stack.apis.files.files import OpenAIFileObject
+from llama_stack.apis.files import Files, OpenAIFileObject
 from llama_stack.apis.vector_dbs import VectorDB
 from llama_stack.apis.vector_io import (
+    Chunk,
     QueryChunksResponse,
     SearchRankingOptions,
-    VectorStoreContent,
-    VectorStoreDeleteResponse,
-    VectorStoreListResponse,
-    VectorStoreObject,
-    VectorStoreSearchResponse,
-    VectorStoreSearchResponsePage,
-)
-from llama_stack.apis.vector_io.vector_io import (
-    Chunk,
     VectorStoreChunkingStrategy,
     VectorStoreChunkingStrategyAuto,
     VectorStoreChunkingStrategyStatic,
+    VectorStoreContent,
+    VectorStoreDeleteResponse,
     VectorStoreFileContentsResponse,
     VectorStoreFileCounts,
     VectorStoreFileDeleteResponse,
@@ -37,13 +31,24 @@ from llama_stack.apis.vector_io.vector_io import (
     VectorStoreFileObject,
     VectorStoreFileStatus,
     VectorStoreListFilesResponse,
+    VectorStoreListResponse,
+    VectorStoreObject,
+    VectorStoreSearchResponse,
+    VectorStoreSearchResponsePage,
 )
+from llama_stack.providers.utils.kvstore.api import KVStore
 from llama_stack.providers.utils.memory.vector_store import content_from_data_and_mime_type, make_overlapped_chunks
 
 logger = logging.getLogger(__name__)
 
 # Constants for OpenAI vector stores
 CHUNK_MULTIPLIER = 5
+
+VERSION = "v3"
+VECTOR_DBS_PREFIX = f"vector_dbs:{VERSION}::"
+OPENAI_VECTOR_STORES_PREFIX = f"openai_vector_stores:{VERSION}::"
+OPENAI_VECTOR_STORES_FILES_PREFIX = f"openai_vector_stores_files:{VERSION}::"
+OPENAI_VECTOR_STORES_FILES_CONTENTS_PREFIX = f"openai_vector_stores_files_contents:{VERSION}::"
 
 
 class OpenAIVectorStoreMixin(ABC):
@@ -56,26 +61,45 @@ class OpenAIVectorStoreMixin(ABC):
     # These should be provided by the implementing class
     openai_vector_stores: dict[str, dict[str, Any]]
     files_api: Files | None
+    # KV store for persisting OpenAI vector store metadata
+    kvstore: KVStore | None
 
-    @abstractmethod
     async def _save_openai_vector_store(self, store_id: str, store_info: dict[str, Any]) -> None:
         """Save vector store metadata to persistent storage."""
-        pass
+        assert self.kvstore is not None
+        key = f"{OPENAI_VECTOR_STORES_PREFIX}{store_id}"
+        await self.kvstore.set(key=key, value=json.dumps(store_info))
+        # update in-memory cache
+        self.openai_vector_stores[store_id] = store_info
 
-    @abstractmethod
     async def _load_openai_vector_stores(self) -> dict[str, dict[str, Any]]:
         """Load all vector store metadata from persistent storage."""
-        pass
+        assert self.kvstore is not None
+        start_key = OPENAI_VECTOR_STORES_PREFIX
+        end_key = f"{OPENAI_VECTOR_STORES_PREFIX}\xff"
+        stored_data = await self.kvstore.values_in_range(start_key, end_key)
 
-    @abstractmethod
+        stores: dict[str, dict[str, Any]] = {}
+        for item in stored_data:
+            info = json.loads(item)
+            stores[info["id"]] = info
+        return stores
+
     async def _update_openai_vector_store(self, store_id: str, store_info: dict[str, Any]) -> None:
         """Update vector store metadata in persistent storage."""
-        pass
+        assert self.kvstore is not None
+        key = f"{OPENAI_VECTOR_STORES_PREFIX}{store_id}"
+        await self.kvstore.set(key=key, value=json.dumps(store_info))
+        # update in-memory cache
+        self.openai_vector_stores[store_id] = store_info
 
-    @abstractmethod
     async def _delete_openai_vector_store_from_storage(self, store_id: str) -> None:
         """Delete vector store metadata from persistent storage."""
-        pass
+        assert self.kvstore is not None
+        key = f"{OPENAI_VECTOR_STORES_PREFIX}{store_id}"
+        await self.kvstore.delete(key)
+        # remove from in-memory cache
+        self.openai_vector_stores.pop(store_id, None)
 
     @abstractmethod
     async def _save_openai_vector_store_file(
@@ -114,6 +138,10 @@ class OpenAIVectorStoreMixin(ABC):
         """Unregister a vector database (provider-specific implementation)."""
         pass
 
+    async def initialize_openai_vector_stores(self) -> None:
+        """Load existing OpenAI vector stores into the in-memory cache."""
+        self.openai_vector_stores = await self._load_openai_vector_stores()
+
     @abstractmethod
     async def insert_chunks(
         self,
@@ -144,9 +172,9 @@ class OpenAIVectorStoreMixin(ABC):
         provider_vector_db_id: str | None = None,
     ) -> VectorStoreObject:
         """Creates a vector store."""
-        # store and vector_db have the same id
-        store_id = name or str(uuid.uuid4())
         created_at = int(time.time())
+        # Derive the canonical vector_db_id (allow override, else generate)
+        vector_db_id = provider_vector_db_id or f"vs_{uuid.uuid4()}"
 
         if provider_id is None:
             raise ValueError("Provider ID is required")
@@ -154,19 +182,19 @@ class OpenAIVectorStoreMixin(ABC):
         if embedding_model is None:
             raise ValueError("Embedding model is required")
 
-        # Use provided embedding dimension or default to 384
+        # Embedding dimension is required (defaulted to 384 if not provided)
         if embedding_dimension is None:
             raise ValueError("Embedding dimension is required")
 
-        provider_vector_db_id = provider_vector_db_id or store_id
+        # Register the VectorDB backing this vector store
         vector_db = VectorDB(
-            identifier=store_id,
+            identifier=vector_db_id,
             embedding_dimension=embedding_dimension,
             embedding_model=embedding_model,
             provider_id=provider_id,
-            provider_resource_id=provider_vector_db_id,
+            provider_resource_id=vector_db_id,
+            vector_db_name=name,
         )
-        # Register the vector DB
         await self.register_vector_db(vector_db)
 
         # Create OpenAI vector store metadata
@@ -180,11 +208,11 @@ class OpenAIVectorStoreMixin(ABC):
             in_progress=0,
             total=0,
         )
-        store_info = {
-            "id": store_id,
+        store_info: dict[str, Any] = {
+            "id": vector_db_id,
             "object": "vector_store",
             "created_at": created_at,
-            "name": store_id,
+            "name": name,
             "usage_bytes": 0,
             "file_counts": file_counts.model_dump(),
             "status": status,
@@ -204,18 +232,18 @@ class OpenAIVectorStoreMixin(ABC):
         store_info["metadata"] = metadata
 
         # Save to persistent storage (provider-specific)
-        await self._save_openai_vector_store(store_id, store_info)
+        await self._save_openai_vector_store(vector_db_id, store_info)
 
         # Store in memory cache
-        self.openai_vector_stores[store_id] = store_info
+        self.openai_vector_stores[vector_db_id] = store_info
 
         # Now that our vector store is created, attach any files that were provided
         file_ids = file_ids or []
-        tasks = [self.openai_attach_file_to_vector_store(store_id, file_id) for file_id in file_ids]
+        tasks = [self.openai_attach_file_to_vector_store(vector_db_id, file_id) for file_id in file_ids]
         await asyncio.gather(*tasks)
 
         # Get the updated store info and return it
-        store_info = self.openai_vector_stores[store_id]
+        store_info = self.openai_vector_stores[vector_db_id]
         return VectorStoreObject.model_validate(store_info)
 
     async def openai_list_vector_stores(
@@ -318,7 +346,7 @@ class OpenAIVectorStoreMixin(ABC):
         await self._delete_openai_vector_store_from_storage(vector_store_id)
 
         # Delete from in-memory cache
-        del self.openai_vector_stores[vector_store_id]
+        self.openai_vector_stores.pop(vector_store_id, None)
 
         # Also delete the underlying vector DB
         try:
@@ -339,12 +367,15 @@ class OpenAIVectorStoreMixin(ABC):
         max_num_results: int | None = 10,
         ranking_options: SearchRankingOptions | None = None,
         rewrite_query: bool | None = False,
-        # search_mode: Literal["keyword", "vector", "hybrid"] = "vector",
+        search_mode: str | None = "vector",  # Using str instead of Literal due to OpenAPI schema generator limitations
     ) -> VectorStoreSearchResponsePage:
         """Search for chunks in a vector store."""
-        # TODO: Add support in the API for this
-        search_mode = "vector"
         max_num_results = max_num_results or 10
+
+        # Validate search_mode
+        valid_modes = {"keyword", "vector", "hybrid"}
+        if search_mode not in valid_modes:
+            raise ValueError(f"search_mode must be one of {valid_modes}, got {search_mode}")
 
         if vector_store_id not in self.openai_vector_stores:
             raise ValueError(f"Vector store {vector_store_id} not found")
@@ -574,6 +605,7 @@ class OpenAIVectorStoreMixin(ABC):
 
         # Save vector store file to persistent storage (provider-specific)
         dict_chunks = [c.model_dump() for c in chunks]
+        # This should be updated to include chunk_id
         await self._save_openai_vector_store_file(vector_store_id, file_id, file_info, dict_chunks)
 
         # Update file_ids and file_counts in vector store metadata

@@ -16,8 +16,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from llama_stack.apis.files import Files
-from llama_stack.apis.inference import InterleavedContent
-from llama_stack.apis.inference.inference import Inference
+from llama_stack.apis.inference import Inference, InterleavedContent
 from llama_stack.apis.vector_dbs import VectorDB
 from llama_stack.apis.vector_io import (
     Chunk,
@@ -74,7 +73,15 @@ class FaissIndex(EmbeddingIndex):
             self.chunk_by_index = {int(k): Chunk.model_validate_json(v) for k, v in data["chunk_by_index"].items()}
 
             buffer = io.BytesIO(base64.b64decode(data["faiss_index"]))
-            self.index = faiss.deserialize_index(np.loadtxt(buffer, dtype=np.uint8))
+            try:
+                self.index = faiss.deserialize_index(np.load(buffer, allow_pickle=False))
+            except Exception as e:
+                logger.debug(e, exc_info=True)
+                raise ValueError(
+                    "Error deserializing Faiss index from storage. If you recently upgraded your Llama Stack, Faiss, "
+                    "or NumPy versions, you may need to delete the index and re-create it again or downgrade versions.\n"
+                    f"The problematic index is stored in the key value store {self.kvstore} under the key '{index_key}'."
+                ) from e
 
     async def _save_index(self):
         if not self.kvstore or not self.bank_id:
@@ -82,7 +89,7 @@ class FaissIndex(EmbeddingIndex):
 
         np_index = faiss.serialize_index(self.index)
         buffer = io.BytesIO()
-        np.savetxt(buffer, np_index)
+        np.save(buffer, np_index, allow_pickle=False)
         data = {
             "chunk_by_index": {k: v.model_dump_json() for k, v in self.chunk_by_index.items()},
             "faiss_index": base64.b64encode(buffer.getvalue()).decode("utf-8"),
@@ -174,8 +181,8 @@ class FaissVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPr
             )
             self.cache[vector_db.identifier] = index
 
-        # Load existing OpenAI vector stores using the mixin method
-        self.openai_vector_stores = await self._load_openai_vector_stores()
+        # Load existing OpenAI vector stores into the in-memory cache
+        await self.initialize_openai_vector_stores()
 
     async def shutdown(self) -> None:
         # Cleanup if needed
@@ -254,42 +261,10 @@ class FaissVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPr
 
         return await index.query_chunks(query, params)
 
-    # OpenAI Vector Store Mixin abstract method implementations
-    async def _save_openai_vector_store(self, store_id: str, store_info: dict[str, Any]) -> None:
-        """Save vector store metadata to kvstore."""
-        assert self.kvstore is not None
-        key = f"{OPENAI_VECTOR_STORES_PREFIX}{store_id}"
-        await self.kvstore.set(key=key, value=json.dumps(store_info))
-
-    async def _load_openai_vector_stores(self) -> dict[str, dict[str, Any]]:
-        """Load all vector store metadata from kvstore."""
-        assert self.kvstore is not None
-        start_key = OPENAI_VECTOR_STORES_PREFIX
-        end_key = f"{OPENAI_VECTOR_STORES_PREFIX}\xff"
-        stored_openai_stores = await self.kvstore.values_in_range(start_key, end_key)
-
-        stores = {}
-        for store_data in stored_openai_stores:
-            store_info = json.loads(store_data)
-            stores[store_info["id"]] = store_info
-        return stores
-
-    async def _update_openai_vector_store(self, store_id: str, store_info: dict[str, Any]) -> None:
-        """Update vector store metadata in kvstore."""
-        assert self.kvstore is not None
-        key = f"{OPENAI_VECTOR_STORES_PREFIX}{store_id}"
-        await self.kvstore.set(key=key, value=json.dumps(store_info))
-
-    async def _delete_openai_vector_store_from_storage(self, store_id: str) -> None:
-        """Delete vector store metadata from kvstore."""
-        assert self.kvstore is not None
-        key = f"{OPENAI_VECTOR_STORES_PREFIX}{store_id}"
-        await self.kvstore.delete(key)
-
     async def _save_openai_vector_store_file(
         self, store_id: str, file_id: str, file_info: dict[str, Any], file_contents: list[dict[str, Any]]
     ) -> None:
-        """Save vector store file metadata to kvstore."""
+        """Save vector store file data to kvstore."""
         assert self.kvstore is not None
         key = f"{OPENAI_VECTOR_STORES_FILES_PREFIX}{store_id}:{file_id}"
         await self.kvstore.set(key=key, value=json.dumps(file_info))
@@ -317,7 +292,16 @@ class FaissVectorIOAdapter(OpenAIVectorStoreMixin, VectorIO, VectorDBsProtocolPr
         await self.kvstore.set(key=key, value=json.dumps(file_info))
 
     async def _delete_openai_vector_store_file_from_storage(self, store_id: str, file_id: str) -> None:
-        """Delete vector store file metadata from kvstore."""
+        """Delete vector store data from kvstore."""
         assert self.kvstore is not None
-        key = f"{OPENAI_VECTOR_STORES_FILES_PREFIX}{store_id}:{file_id}"
-        await self.kvstore.delete(key)
+
+        keys_to_delete = [
+            f"{OPENAI_VECTOR_STORES_FILES_PREFIX}{store_id}:{file_id}",
+            f"{OPENAI_VECTOR_STORES_FILES_CONTENTS_PREFIX}{store_id}:{file_id}",
+        ]
+        for key in keys_to_delete:
+            try:
+                await self.kvstore.delete(key)
+            except Exception as e:
+                logger.warning(f"Failed to delete key {key}: {e}")
+                continue

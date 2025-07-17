@@ -200,7 +200,7 @@ def validate_and_prepare_providers(
         specs = {}
         for provider in providers:
             if not provider.provider_id or provider.provider_id == "__disabled__":
-                logger.warning(f"Provider `{provider.provider_type}` for API `{api}` is disabled")
+                logger.debug(f"Provider `{provider.provider_type}` for API `{api}` is disabled")
                 continue
 
             validate_provider(provider, api, provider_registry)
@@ -255,6 +255,10 @@ async def instantiate_providers(
     impls: dict[Api, Any] = {}
     inner_impls_by_provider_id: dict[str, dict[str, Any]] = {f"inner-{x.value}": {} for x in router_apis}
     for api_str, provider in sorted_providers:
+        # Skip providers that are not enabled
+        if provider.provider_id is None:
+            continue
+
         deps = {a: impls[a] for a in provider.spec.api_dependencies}
         for a in provider.spec.optional_api_dependencies:
             if a in impls:
