@@ -172,7 +172,6 @@ def replace_env_vars(config: Any, path: str = "") -> Any:
                             # Create a copy with resolved provider_id but original config
                             disabled_provider = v.copy()
                             disabled_provider["provider_id"] = resolved_provider_id
-                            result.append(disabled_provider)
                             continue
                     except EnvVarError:
                         # If we can't resolve the provider_id, continue with normal processing
@@ -291,7 +290,7 @@ def validate_env_pair(env_pair: str) -> tuple[str, str]:
 
 
 def add_internal_implementations(impls: dict[Api, Any], run_config: StackRunConfig) -> None:
-    """Add internal implementations (inspect and providers) to the implementations dictionary.
+    """Add internal implementations (inspect, providers, and admin) to the implementations dictionary.
 
     Args:
         impls: Dictionary of API implementations
@@ -308,6 +307,23 @@ def add_internal_implementations(impls: dict[Api, Any], run_config: StackRunConf
         deps=impls,
     )
     impls[Api.providers] = providers_impl
+
+    # Add admin implementation with auth provider dependency
+    from llama_stack.distribution.admin import DistributionAdminImpl
+    from llama_stack.distribution.datatypes import DistributionAdminConfig
+    
+    # Get auth provider from middleware if available
+    auth_provider = None
+    if run_config.server.auth:
+        from llama_stack.distribution.server.auth_providers import create_auth_provider
+        auth_provider = create_auth_provider(run_config.server.auth)
+    
+    admin_deps = {"auth_provider": auth_provider}
+    admin_impl = DistributionAdminImpl(
+        DistributionAdminConfig(),
+        deps=admin_deps,
+    )
+    impls[Api.admin] = admin_impl
 
 
 # Produces a stack of providers for the given run config. Not all APIs may be

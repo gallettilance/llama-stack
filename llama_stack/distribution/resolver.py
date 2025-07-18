@@ -7,6 +7,7 @@ import importlib
 import inspect
 from typing import Any
 
+from llama_stack.apis.admin import Admin
 from llama_stack.apis.agents import Agents
 from llama_stack.apis.benchmarks import Benchmarks
 from llama_stack.apis.datasetio import DatasetIO
@@ -65,6 +66,7 @@ def api_protocol_map() -> dict[Api, Any]:
         Api.agents: Agents,
         Api.inference: Inference,
         Api.inspect: Inspect,
+        Api.admin: Admin,
         Api.vector_io: VectorIO,
         Api.vector_dbs: VectorDBs,
         Api.models: Models,

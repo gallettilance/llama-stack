@@ -20,21 +20,32 @@ def extract_api_from_path(path: str) -> tuple[str, str]:
     """Extract API name and method from request path for scope validation"""
     # Remove leading/trailing slashes and split
     path = path.strip("/")
+    
+    # Handle empty paths
+    if not path:
+        return "unknown", "GET"
+        
     parts = path.split("/")
 
     # Handle common API path patterns
     if len(parts) >= 2 and parts[0] == "v1":
         api_name = parts[1]
         # Handle nested paths like /v1/models/{id} or /v1/inference/chat-completion
-        if api_name in ["inference", "models", "agents", "tools", "vector_dbs", "safety", "eval", "scoring"]:
+        if api_name in ["inference", "models", "agents", "tools", "toolgroups", "vector_dbs", "safety", "eval", "scoring"]:
             return api_name, "POST"  # Default to POST for scope checking
         elif api_name == "openai":
             # Handle OpenAI compatibility endpoints like /v1/openai/v1/chat/completions
             if len(parts) >= 4:
                 return "inference", "POST"  # OpenAI endpoints are typically inference
+        else:
+            # /v1/something-unknown
+            return "unknown", "GET"
+    elif len(parts) == 1 and parts[0] == "v1":
+        # Handle /v1/ (just the version, no API specified)
+        return "unknown", "GET"
 
     # Fallback - try to extract from first path component
-    if parts:
+    if parts and parts[0]:
         return parts[0], "POST"
 
     return "unknown", "GET"
@@ -147,20 +158,31 @@ class AuthenticationMiddleware:
             if validation_result.attributes and "scopes" in validation_result.attributes:
                 user_scopes = set(validation_result.attributes["scopes"])
 
-            # Verify user has at least one required scope
-            if not user_scopes.intersection(required_scopes):
-                logger.warning(
-                    f"Access denied for {validation_result.principal} to {api_name} API. "
-                    f"Required scopes: {required_scopes}, User scopes: {user_scopes}"
-                )
-                return await self._send_auth_error(
-                    send, f"Insufficient OAuth2 scopes for {api_name} API. Required: {', '.join(required_scopes)}"
-                )
+            # Special case: Cache refresh endpoint allows any authenticated user
+            # since stale JWKS affects all authentication
+            if path == "/v1/admin/cache/refresh" and method == "POST":
+                logger.info(f"Cache refresh request from {validation_result.principal} - allowing any authenticated user")
+            else:
+                # Verify user has at least one required scope
+                if not user_scopes.intersection(required_scopes):
+                    logger.warning(
+                        f"Access denied for {validation_result.principal} to {api_name} API. "
+                        f"Required scopes: {required_scopes}, User scopes: {user_scopes}"
+                    )
+                    return await self._send_auth_error(
+                        send, f"Insufficient OAuth2 scopes for {api_name} API. Required: {', '.join(required_scopes)}"
+                    )
 
-            logger.debug(
-                f"OAuth2 scope validation passed for {validation_result.principal} "
-                f"on {api_name} API with scopes: {user_scopes.intersection(required_scopes)}"
-            )
+            if user_scopes.intersection(required_scopes):
+                logger.debug(
+                    f"OAuth2 scope validation passed for {validation_result.principal} "
+                    f"on {api_name} API with scopes: {user_scopes.intersection(required_scopes)}"
+                )
+            else:
+                logger.debug(
+                    f"OAuth2 scope validation passed for {validation_result.principal} "
+                    f"on {api_name} API (no scopes required or cache refresh endpoint)"
+                )
 
             # Store the client ID in the request scope so that downstream middleware (like QuotaMiddleware)
             # can identify the requester and enforce per-client rate limits.

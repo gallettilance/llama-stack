@@ -30,6 +30,10 @@ STANDARD_OAUTH2_SCOPES = {
     # Tools API
     "llama:tools": "Access to tool runtime and execution",
     
+    # Tool Groups API
+    "llama:toolgroups:read": "Read access to tool groups (list, get tool group details)",
+    "llama:toolgroups:write": "Write access to tool groups (register, unregister)",
+    
     # Vector DB API
     "llama:vector_dbs:read": "Read access to vector databases",
     "llama:vector_dbs:write": "Write access to vector databases",
@@ -74,6 +78,11 @@ def get_required_scopes_for_api(api_name: str, method: str = "GET") -> Set[str]:
             required_scopes.add("llama:agents:read") 
     elif api_name in ["tools", "tool_runtime"]:
         required_scopes.add("llama:tools")
+    elif api_name == "toolgroups":
+        if method in ["POST", "PUT", "DELETE"]:
+            required_scopes.add("llama:toolgroups:write")
+        else:
+            required_scopes.add("llama:toolgroups:read")
     elif api_name == "vector_dbs":
         if method in ["POST", "PUT", "DELETE"]:
             required_scopes.add("llama:vector_dbs:write")
@@ -83,6 +92,11 @@ def get_required_scopes_for_api(api_name: str, method: str = "GET") -> Set[str]:
         required_scopes.add("llama:safety")
     elif api_name in ["eval", "benchmarks", "scoring"]:
         required_scopes.add("llama:eval")
+    elif api_name == "admin":
+        # Cache refresh should be accessible to any authenticated user
+        # since stale JWKS affects all authentication
+        required_scopes.add("llama:admin")  # Keep admin scope for other admin operations
+        # Note: Cache refresh endpoint specifically allows any authenticated user
     
     return required_scopes
 

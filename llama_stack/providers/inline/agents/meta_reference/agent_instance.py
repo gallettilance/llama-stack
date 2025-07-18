@@ -187,7 +187,7 @@ class ChatAgent(ShieldRunnerMixin):
 
         # Refresh tools for MCP toolgroups in case auth is now available
         await self._refresh_mcp_tools(request.toolgroups)
-        
+
         await self._initialize_tools(request.toolgroups)
         async for chunk in self._run_turn(request, turn_id):
             yield chunk
@@ -772,18 +772,20 @@ class ChatAgent(ShieldRunnerMixin):
         """Refresh MCP tools in case authentication is now available."""
         # Determine which tools to refresh
         tool_groups_to_refresh = toolgroups_for_turn or self.agent_config.toolgroups or []
-        
+
         logger.debug(f"Refreshing MCP tools for {len(tool_groups_to_refresh)} toolgroups")
-        
+
         for toolgroup in tool_groups_to_refresh:
             name = toolgroup.name if isinstance(toolgroup, AgentToolGroupWithArgs) else toolgroup
             toolgroup_name, _ = self._parse_toolgroup_name(name)
-            
+
             # Only refresh MCP toolgroups (those with endpoints)
             try:
                 tool_group = await self.tool_groups_api.get_tool_group(toolgroup_name)
                 if tool_group.mcp_endpoint:
-                    logger.debug(f"Refreshing tools for MCP toolgroup {toolgroup_name} with endpoint {tool_group.mcp_endpoint.uri}")
+                    logger.debug(
+                        f"Refreshing tools for MCP toolgroup {toolgroup_name} with endpoint {tool_group.mcp_endpoint.uri}"
+                    )
                     # Refresh tools for this MCP toolgroup
                     await self.tool_groups_api.refresh_tools(toolgroup_name)
                 else:

@@ -119,26 +119,59 @@ class OAuth2TokenAuthProvider(AuthProvider):
             header = jwt.get_unverified_header(token)
             kid = header["kid"]
             if kid not in self._jwks:
-                raise ValueError(f"Unknown key ID: {kid}")
-            key_data = self._jwks[kid]
-            algorithm = header.get("alg", "RS256")
-            claims = jwt.decode(
-                token,
-                key_data,
-                algorithms=[algorithm],
-                audience=self.config.audience,
-                issuer=self.config.issuer,
-            )
+                # Try to refresh JWKS cache and retry once
+                logger.info(f"Unknown key ID: {kid}, attempting to refresh JWKS cache...")
+                logger.info(f"Current JWKS keys: {list(self._jwks.keys())}")
+                try:
+                    # Clear cache and force refresh
+                    self._jwks_at = 0.0
+                    self._jwks = {}
+                    await self._refresh_jwks()
+                    
+                    # Retry validation with fresh JWKS
+                    logger.info(f"After refresh, JWKS keys: {list(self._jwks.keys())}")
+                    if kid not in self._jwks:
+                        logger.error(f"Key ID {kid} still not found after JWKS refresh")
+                        raise ValueError(f"Unknown key ID: {kid} (after JWKS refresh)")
+                    key_data = self._jwks[kid]
+                    algorithm = header.get("alg", "RS256")
+                    claims = jwt.decode(
+                        token,
+                        key_data,
+                        algorithms=[algorithm],
+                        audience=self.config.audience,
+                        issuer=self.config.issuer,
+                    )
+                    logger.info("JWT validation successful after JWKS refresh")
+                except Exception as refresh_exc:
+                    logger.warning(f"JWKS refresh failed: {refresh_exc}")
+                    raise ValueError(f"Unknown key ID: {kid}")
+            else:
+                key_data = self._jwks[kid]
+                algorithm = header.get("alg", "RS256")
+                claims = jwt.decode(
+                    token,
+                    key_data,
+                    algorithms=[algorithm],
+                    audience=self.config.audience,
+                    issuer=self.config.issuer,
+                )
         except Exception as exc:
             raise ValueError("Invalid JWT token") from exc
 
-        # Extract and validate OAuth2 scopes - deny by default if no valid scopes
+        # Extract OAuth2 scopes from token
         token_scopes = set(claims.get("scope", "").split()) if claims.get("scope") else set()
 
         # Validate scopes against standard Llama Stack scopes
-        valid_scopes = validate_scopes(token_scopes)
-
-        logger.info(f"User {claims['sub']} authenticated with scopes: {valid_scopes}")
+        # Allow tokens without Llama Stack scopes for basic authentication
+        try:
+            valid_scopes = validate_scopes(token_scopes)
+            logger.info(f"User {claims['sub']} authenticated with scopes: {valid_scopes}")
+        except ValueError:
+            # Token doesn't have Llama Stack scopes, but still allow basic authentication
+            # This is important for cache refresh and other emergency operations
+            valid_scopes = set()
+            logger.info(f"User {claims['sub']} authenticated without Llama Stack scopes (basic auth only)")
 
         # Convert scopes to user attributes for the existing ABAC system
         attributes = {"scopes": list(valid_scopes)}
@@ -238,7 +271,13 @@ class OAuth2TokenAuthProvider(AuthProvider):
         async with self._jwks_lock:
             if self.config.jwks is None:
                 raise ValueError("JWKS is not configured")
-            if time.time() - self._jwks_at > self.config.jwks.key_recheck_period:
+            
+            # Check if cache needs refresh
+            cache_age = time.time() - self._jwks_at
+            logger.debug(f"JWKS cache age: {cache_age}s, recheck period: {self.config.jwks.key_recheck_period}s")
+            
+            if cache_age > self.config.jwks.key_recheck_period:
+                logger.info(f"Refreshing JWKS from {self.config.jwks.uri}")
                 headers = {}
                 if self.config.jwks.token:
                     headers["Authorization"] = f"Bearer {self.config.jwks.token}"
@@ -254,6 +293,9 @@ class OAuth2TokenAuthProvider(AuthProvider):
                         updated[kid] = k
                     self._jwks = updated
                     self._jwks_at = time.time()
+                    logger.info(f"JWKS refreshed successfully, got {len(updated)} keys: {list(updated.keys())}")
+            else:
+                logger.debug(f"JWKS cache is still fresh (age: {cache_age}s)")
 
 
 class CustomAuthProvider(AuthProvider):

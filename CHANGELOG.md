@@ -17,6 +17,8 @@ Published on: TBD
 - `llama:agents:read` - Read access to agents (`GET /v1/agents/*`)
 - `llama:agents:write` - Write access to agents (`POST/PUT/DELETE /v1/agents/*`)
 - `llama:tools` - Access to tool runtime (`/v1/tools/*`)
+- `llama:toolgroups:read` - Read access to tool groups (`GET /v1/toolgroups/*`)
+- `llama:toolgroups:write` - Write access to tool groups (`POST/PUT/DELETE /v1/toolgroups/*`)
 - `llama:vector_dbs:read` - Read access to vector databases
 - `llama:vector_dbs:write` - Write access to vector databases
 - `llama:safety` - Access to safety shields (`/v1/safety/*`)

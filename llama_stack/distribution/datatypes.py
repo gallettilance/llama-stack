@@ -274,6 +274,12 @@ class AuthenticationRequiredError(Exception):
     pass
 
 
+class DistributionAdminConfig(BaseModel):
+    """Configuration for the admin API."""
+    
+    enabled: bool = Field(default=True, description="Whether the admin API is enabled")
+
+
 class QuotaPeriod(StrEnum):
     DAY = "day"
 

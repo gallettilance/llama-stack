@@ -30,6 +30,8 @@ class TestOAuth2Scopes:
             "llama:agents:read",
             "llama:agents:write",
             "llama:tools",
+            "llama:toolgroups:read",
+            "llama:toolgroups:write",
             "llama:vector_dbs:read",
             "llama:vector_dbs:write",
             "llama:safety",
@@ -142,6 +144,21 @@ class TestScopeRequirements:
             assert "llama:tools" in scopes
             assert "llama:admin" in scopes
 
+    def test_toolgroups_api_scopes(self):
+        """Test toolgroups API scope requirements"""
+        # Read operations
+        read_scopes = get_required_scopes_for_api("toolgroups", "GET")
+        assert "llama:toolgroups:read" in read_scopes
+        assert "llama:admin" in read_scopes
+        assert "llama:toolgroups:write" not in read_scopes
+        
+        # Write operations
+        for method in ["POST", "PUT", "DELETE"]:
+            write_scopes = get_required_scopes_for_api("toolgroups", method)
+            assert "llama:toolgroups:write" in write_scopes
+            assert "llama:admin" in write_scopes
+            assert "llama:toolgroups:read" not in write_scopes
+
     def test_vector_dbs_api_scopes(self):
         """Test vector databases API scope requirements"""
         # Read operations
@@ -238,11 +255,15 @@ class TestScopeBasedAuth:
     @pytest.fixture
     def mock_auth_config(self):
         """Create mock OAuth2 authentication config"""
+        from llama_stack.distribution.datatypes import OAuth2JWKSConfig
         return AuthenticationConfig(
             provider_config=OAuth2TokenAuthConfig(
                 type=AuthProviderType.OAUTH2_TOKEN,
                 issuer="https://test-issuer.com",
                 audience="llama-stack",
+                jwks=OAuth2JWKSConfig(
+                    uri="https://test-issuer.com/.well-known/jwks.json"
+                )
             )
         )
 
@@ -275,22 +296,31 @@ class TestScopeBasedAuth:
             
             # Mock the auth provider
             from llama_stack.distribution.server.auth_providers import OAuth2TokenAuthProvider
-            from llama_stack.distribution.datatypes import OAuth2TokenAuthConfig, AuthProviderType
+            from llama_stack.distribution.datatypes import OAuth2TokenAuthConfig, AuthProviderType, OAuth2JWKSConfig
             
             config = OAuth2TokenAuthConfig(
                 type=AuthProviderType.OAUTH2_TOKEN,
                 issuer="test-issuer",
                 audience="llama-stack",
+                jwks=OAuth2JWKSConfig(
+                    uri="https://test-issuer.com/.well-known/jwks.json"
+                )
             )
             
             provider = OAuth2TokenAuthProvider(config)
             
-            # Mock the key retrieval
-            with patch.object(provider, "_get_public_key") as mock_get_key:
-                mock_get_key.return_value = "mock-key"
+            # Mock the key retrieval and JWT validation
+            with patch.object(provider, "_refresh_jwks") as mock_refresh_jwks:
+                mock_refresh_jwks.return_value = None
+                # Set up mock JWKS data  
+                provider._jwks = {"mock-kid": "mock-key-data"}
                 
-                # Test token validation
-                user = await provider.validate_token("mock-token", {})
+                # Mock JWT header
+                with patch("llama_stack.distribution.server.auth_providers.jwt.get_unverified_header") as mock_header:
+                    mock_header.return_value = {"kid": "mock-kid", "alg": "RS256"}
+                    
+                    # Test token validation
+                    user = await provider.validate_token("mock-token", {})
                 
                 assert user.principal == "test-user"
                 assert user.attributes is not None

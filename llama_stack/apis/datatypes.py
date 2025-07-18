@@ -37,6 +37,7 @@ class Api(Enum):
 
     # built-in API
     inspect = "inspect"
+    admin = "admin"
 
 
 @json_schema_type

@@ -44,7 +44,7 @@ class ToolGroupsRoutingTable(CommonRoutingTableImpl, ToolGroups):
 
     async def list_tools(self, toolgroup_id: str | None = None) -> ListToolsResponse:
         logger.debug(f"Listing tools for toolgroup_id: {toolgroup_id}")
-        
+
         if toolgroup_id:
             if group_id := parse_toolgroup_from_toolgroup_name_pair(toolgroup_id):
                 toolgroup_id = group_id
@@ -57,7 +57,7 @@ class ToolGroupsRoutingTable(CommonRoutingTableImpl, ToolGroups):
             if toolgroup.identifier not in self.toolgroups_to_tools:
                 logger.debug(f"Toolgroup {toolgroup.identifier} not in cache, indexing...")
                 await self._index_tools(toolgroup)
-            
+
             cached_tools = self.toolgroups_to_tools.get(toolgroup.identifier, [])
             logger.debug(f"Found {len(cached_tools)} cached tools for toolgroup {toolgroup.identifier}")
             all_tools.extend(cached_tools)
@@ -69,10 +69,10 @@ class ToolGroupsRoutingTable(CommonRoutingTableImpl, ToolGroups):
         try:
             provider_impl = super().get_provider_impl(toolgroup.identifier, toolgroup.provider_id)
             logger.debug(f"Indexing tools for toolgroup {toolgroup.identifier} with provider {toolgroup.provider_id}")
-            
+
             if toolgroup.mcp_endpoint:
                 logger.debug(f"Toolgroup {toolgroup.identifier} has MCP endpoint: {toolgroup.mcp_endpoint.uri}")
-            
+
             tooldefs_response = await provider_impl.list_runtime_tools(toolgroup.identifier, toolgroup.mcp_endpoint)
 
             # TODO: kill this Tool vs ToolDef distinction
@@ -93,16 +93,18 @@ class ToolGroupsRoutingTable(CommonRoutingTableImpl, ToolGroups):
             self.toolgroups_to_tools[toolgroup.identifier] = tools
             for tool in tools:
                 self.tool_to_toolgroup[tool.identifier] = toolgroup.identifier
-                
+
             logger.info(f"Successfully indexed {len(tools)} tools for toolgroup {toolgroup.identifier}")
-            
+
         except Exception as e:
             logger.warning(f"Failed to index tools for toolgroup {toolgroup.identifier}: {e}")
             # Don't let tool indexing failures crash the system
             # Initialize empty tools list so the toolgroup still exists
             self.toolgroups_to_tools[toolgroup.identifier] = []
             if toolgroup.mcp_endpoint:
-                logger.info(f"Toolgroup {toolgroup.identifier} has MCP endpoint - tools may be available after authentication")
+                logger.info(
+                    f"Toolgroup {toolgroup.identifier} has MCP endpoint - tools may be available after authentication"
+                )
             else:
                 logger.error(f"Non-MCP toolgroup {toolgroup.identifier} failed to index tools: {e}")
             # Don't raise - we want the system to continue running even if tool indexing fails
@@ -170,7 +172,7 @@ class ToolGroupsRoutingTable(CommonRoutingTableImpl, ToolGroups):
                     if tool.identifier in self.tool_to_toolgroup:
                         del self.tool_to_toolgroup[tool.identifier]
                 del self.toolgroups_to_tools[toolgroup_id]
-            
+
             # Re-index tools for this toolgroup
             await self._index_tools(toolgroup)
         except Exception as e:
