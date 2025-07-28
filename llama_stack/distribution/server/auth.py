@@ -10,9 +10,45 @@ import httpx
 
 from llama_stack.distribution.datatypes import AuthenticationConfig
 from llama_stack.distribution.server.auth_providers import create_auth_provider
+from llama_stack.distribution.server.oauth2_scopes import get_required_scopes_for_api
 from llama_stack.log import get_logger
 
 logger = get_logger(name=__name__, category="auth")
+
+
+def extract_api_from_path(path: str) -> tuple[str, str]:
+    """Extract API name and method from request path for scope validation"""
+    # Remove leading/trailing slashes and split
+    path = path.strip("/")
+    
+    # Handle empty paths
+    if not path:
+        return "unknown", "GET"
+        
+    parts = path.split("/")
+
+    # Handle common API path patterns
+    if len(parts) >= 2 and parts[0] == "v1":
+        api_name = parts[1]
+        # Handle nested paths like /v1/models/{id} or /v1/inference/chat-completion
+        if api_name in ["inference", "models", "agents", "tools", "toolgroups", "vector_dbs", "safety", "eval", "scoring"]:
+            return api_name, "POST"  # Default to POST for scope checking
+        elif api_name == "openai":
+            # Handle OpenAI compatibility endpoints like /v1/openai/v1/chat/completions
+            if len(parts) >= 4:
+                return "inference", "POST"  # OpenAI endpoints are typically inference
+        else:
+            # /v1/something-unknown
+            return "unknown", "GET"
+    elif len(parts) == 1 and parts[0] == "v1":
+        # Handle /v1/ (just the version, no API specified)
+        return "unknown", "GET"
+
+    # Fallback - try to extract from first path component
+    if parts and parts[0]:
+        return parts[0], "POST"
+
+    return "unknown", "GET"
 
 
 class AuthenticationMiddleware:
@@ -87,8 +123,12 @@ class AuthenticationMiddleware:
             headers = dict(scope.get("headers", []))
             auth_header = headers.get(b"authorization", b"").decode()
 
-            if not auth_header or not auth_header.startswith("Bearer "):
-                return await self._send_auth_error(send, "Missing or invalid Authorization header")
+            if not auth_header:
+                error_msg = self.auth_provider.get_auth_error_message(scope)
+                return await self._send_auth_error(send, error_msg)
+
+            if not auth_header.startswith("Bearer "):
+                return await self._send_auth_error(send, "Invalid Authorization header format")
 
             token = auth_header.split("Bearer ", 1)[1]
 
@@ -105,6 +145,45 @@ class AuthenticationMiddleware:
                 logger.exception("Error during authentication")
                 return await self._send_auth_error(send, "Authentication service error")
 
+            # Validate OAuth2 scopes for the requested API endpoint
+            path = scope.get("path", "")
+            method = scope.get("method", "GET")
+            api_name, _ = extract_api_from_path(path)
+
+            # Get required scopes for this API endpoint
+            required_scopes = get_required_scopes_for_api(api_name, method)
+
+            # Check if user has any of the required scopes
+            user_scopes = set()
+            if validation_result.attributes and "scopes" in validation_result.attributes:
+                user_scopes = set(validation_result.attributes["scopes"])
+
+            # Special case: Cache refresh endpoint allows any authenticated user
+            # since stale JWKS affects all authentication
+            if path == "/v1/admin/cache/refresh" and method == "POST":
+                logger.info(f"Cache refresh request from {validation_result.principal} - allowing any authenticated user")
+            else:
+                # Verify user has at least one required scope
+                if not user_scopes.intersection(required_scopes):
+                    logger.warning(
+                        f"Access denied for {validation_result.principal} to {api_name} API. "
+                        f"Required scopes: {required_scopes}, User scopes: {user_scopes}"
+                    )
+                    return await self._send_auth_error(
+                        send, f"Insufficient OAuth2 scopes for {api_name} API. Required: {', '.join(required_scopes)}"
+                    )
+
+            if user_scopes.intersection(required_scopes):
+                logger.debug(
+                    f"OAuth2 scope validation passed for {validation_result.principal} "
+                    f"on {api_name} API with scopes: {user_scopes.intersection(required_scopes)}"
+                )
+            else:
+                logger.debug(
+                    f"OAuth2 scope validation passed for {validation_result.principal} "
+                    f"on {api_name} API (no scopes required or cache refresh endpoint)"
+                )
+
             # Store the client ID in the request scope so that downstream middleware (like QuotaMiddleware)
             # can identify the requester and enforce per-client rate limits.
             scope["authenticated_client_id"] = token
@@ -113,9 +192,8 @@ class AuthenticationMiddleware:
             scope["principal"] = validation_result.principal
             if validation_result.attributes:
                 scope["user_attributes"] = validation_result.attributes
-            logger.debug(
-                f"Authentication successful: {validation_result.principal} with {len(validation_result.attributes)} attributes"
-            )
+            attr_count = len(validation_result.attributes) if validation_result.attributes else 0
+            logger.debug(f"Authentication successful: {validation_result.principal} with {attr_count} attributes")
 
         return await self.app(scope, receive, send)
 

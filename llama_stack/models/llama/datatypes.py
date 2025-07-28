@@ -5,7 +5,7 @@
 # the root directory of this source tree.
 
 import base64
-from enum import Enum
+from enum import Enum, StrEnum
 from io import BytesIO
 from typing import Annotated, Any, Literal
 
@@ -99,6 +99,7 @@ class ToolDefinition(BaseModel):
     tool_name: BuiltinTool | str
     description: str | None = None
     parameters: dict[str, ToolParamDefinition] | None = None
+    toolgroup_name: str | None = None
 
     @field_validator("tool_name", mode="before")
     @classmethod
@@ -171,7 +172,7 @@ class GenerationResult(BaseModel):
     ignore_token: bool
 
 
-class QuantizationMode(str, Enum):
+class QuantizationMode(StrEnum):
     none = "none"
     fp8_mixed = "fp8_mixed"
     int4_mixed = "int4_mixed"

@@ -19,16 +19,15 @@ from llama_stack.apis.vector_io import (
     QueryChunksResponse,
     SearchRankingOptions,
     VectorIO,
+    VectorStoreChunkingStrategy,
     VectorStoreDeleteResponse,
+    VectorStoreFileContentsResponse,
+    VectorStoreFileObject,
+    VectorStoreFileStatus,
+    VectorStoreListFilesResponse,
     VectorStoreListResponse,
     VectorStoreObject,
     VectorStoreSearchResponsePage,
-)
-from llama_stack.apis.vector_io.vector_io import (
-    VectorStoreChunkingStrategy,
-    VectorStoreFileContentsResponse,
-    VectorStoreFileObject,
-    VectorStoreListFilesResponse,
 )
 from llama_stack.providers.datatypes import Api, VectorDBsProtocolPrivate
 from llama_stack.providers.inline.vector_io.qdrant import QdrantVectorIOConfig as InlineQdrantVectorIOConfig
@@ -71,8 +70,8 @@ class QdrantIndex(EmbeddingIndex):
             )
 
         points = []
-        for i, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=False)):
-            chunk_id = f"{chunk.metadata['document_id']}:chunk-{i}"
+        for _i, (chunk, embedding) in enumerate(zip(chunks, embeddings, strict=False)):
+            chunk_id = chunk.chunk_id
             points.append(
                 PointStruct(
                     id=convert_id(chunk_id),
@@ -215,7 +214,6 @@ class QdrantVectorIOAdapter(VectorIO, VectorDBsProtocolPrivate):
         embedding_model: str | None = None,
         embedding_dimension: int | None = 384,
         provider_id: str | None = None,
-        provider_vector_db_id: str | None = None,
     ) -> VectorStoreObject:
         raise NotImplementedError("OpenAI Vector Stores API is not supported in Qdrant")
 
@@ -257,6 +255,7 @@ class QdrantVectorIOAdapter(VectorIO, VectorDBsProtocolPrivate):
         max_num_results: int | None = 10,
         ranking_options: SearchRankingOptions | None = None,
         rewrite_query: bool | None = False,
+        search_mode: str | None = "vector",
     ) -> VectorStoreSearchResponsePage:
         raise NotImplementedError("OpenAI Vector Stores API is not supported in Qdrant")
 
@@ -272,6 +271,11 @@ class QdrantVectorIOAdapter(VectorIO, VectorDBsProtocolPrivate):
     async def openai_list_files_in_vector_store(
         self,
         vector_store_id: str,
+        limit: int | None = 20,
+        order: str | None = "desc",
+        after: str | None = None,
+        before: str | None = None,
+        filter: VectorStoreFileStatus | None = None,
     ) -> VectorStoreListFilesResponse:
         raise NotImplementedError("OpenAI Vector Stores API is not supported in Qdrant")
 

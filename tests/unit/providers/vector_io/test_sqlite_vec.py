@@ -8,14 +8,12 @@ import asyncio
 
 import numpy as np
 import pytest
-import pytest_asyncio
 
 from llama_stack.apis.vector_io import Chunk, QueryChunksResponse
 from llama_stack.providers.inline.vector_io.sqlite_vec.sqlite_vec import (
     SQLiteVecIndex,
     SQLiteVecVectorIOAdapter,
     _create_sqlite_connection,
-    generate_chunk_id,
 )
 
 # This test is a unit test for the SQLiteVecVectorIOAdapter class. This should only contain
@@ -35,40 +33,23 @@ def loop():
     return asyncio.new_event_loop()
 
 
-@pytest_asyncio.fixture(scope="session", autouse=True)
+@pytest.fixture
 async def sqlite_vec_index(embedding_dimension, tmp_path_factory):
     temp_dir = tmp_path_factory.getbasetemp()
     db_path = str(temp_dir / "test_sqlite.db")
-    index = await SQLiteVecIndex.create(dimension=embedding_dimension, db_path=db_path, bank_id="test_bank")
+    index = await SQLiteVecIndex.create(dimension=embedding_dimension, db_path=db_path, bank_id="test_bank.123")
     yield index
     await index.delete()
 
 
-@pytest.mark.asyncio
-async def test_add_chunks(sqlite_vec_index, sample_chunks, sample_embeddings):
-    await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings, batch_size=2)
-    connection = _create_sqlite_connection(sqlite_vec_index.db_path)
-    cur = connection.cursor()
-    cur.execute(f"SELECT COUNT(*) FROM {sqlite_vec_index.metadata_table}")
-    count = cur.fetchone()[0]
-    assert count == len(sample_chunks)
-    cur.close()
-    connection.close()
+async def test_query_chunk_metadata(sqlite_vec_index, sample_chunks_with_metadata, sample_embeddings_with_metadata):
+    await sqlite_vec_index.add_chunks(sample_chunks_with_metadata, sample_embeddings_with_metadata)
+    response = await sqlite_vec_index.query_vector(sample_embeddings_with_metadata[-1], k=2, score_threshold=0.0)
+    assert response.chunks[0].chunk_metadata == sample_chunks_with_metadata[-1].chunk_metadata
 
 
-@pytest.mark.asyncio
-async def test_query_chunks_vector(sqlite_vec_index, sample_chunks, sample_embeddings, embedding_dimension):
-    await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
-    query_embedding = np.random.rand(embedding_dimension).astype(np.float32)
-    response = await sqlite_vec_index.query_vector(query_embedding, k=2, score_threshold=0.0)
-    assert isinstance(response, QueryChunksResponse)
-    assert len(response.chunks) == 2
-
-
-@pytest.mark.asyncio
 async def test_query_chunks_full_text_search(sqlite_vec_index, sample_chunks, sample_embeddings):
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
-
     query_string = "Sentence 5"
     response = await sqlite_vec_index.query_keyword(k=3, score_threshold=0.0, query_string=query_string)
 
@@ -84,7 +65,6 @@ async def test_query_chunks_full_text_search(sqlite_vec_index, sample_chunks, sa
     assert len(response_no_results.chunks) == 0, f"Expected 0 results, but got {len(response_no_results.chunks)}"
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid(sqlite_vec_index, sample_chunks, sample_embeddings):
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
 
@@ -106,7 +86,6 @@ async def test_query_chunks_hybrid(sqlite_vec_index, sample_chunks, sample_embed
     assert all(response.scores[i] >= response.scores[i + 1] for i in range(len(response.scores) - 1))
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_full_text_search_k_greater_than_results(sqlite_vec_index, sample_chunks, sample_embeddings):
     # Re-initialize with a clean index
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
@@ -119,7 +98,6 @@ async def test_query_chunks_full_text_search_k_greater_than_results(sqlite_vec_i
     assert any("Sentence 1 from document 0" in chunk.content for chunk in response.chunks), "Expected chunk not found"
 
 
-@pytest.mark.asyncio
 async def test_chunk_id_conflict(sqlite_vec_index, sample_chunks, embedding_dimension):
     """Test that chunk IDs do not conflict across batches when inserting chunks."""
     # Reduce batch size to force multiple batches for same document
@@ -132,7 +110,7 @@ async def test_chunk_id_conflict(sqlite_vec_index, sample_chunks, embedding_dime
     cur = connection.cursor()
 
     # Retrieve all chunk IDs to check for duplicates
-    cur.execute(f"SELECT id FROM {sqlite_vec_index.metadata_table}")
+    cur.execute(f"SELECT id FROM [{sqlite_vec_index.metadata_table}]")
     chunk_ids = [row[0] for row in cur.fetchall()]
     cur.close()
     connection.close()
@@ -150,22 +128,6 @@ async def sqlite_vec_adapter(sqlite_connection):
     await adapter.shutdown()
 
 
-def test_generate_chunk_id():
-    chunks = [
-        Chunk(content="test", metadata={"document_id": "doc-1"}),
-        Chunk(content="test ", metadata={"document_id": "doc-1"}),
-        Chunk(content="test 3", metadata={"document_id": "doc-1"}),
-    ]
-
-    chunk_ids = sorted([generate_chunk_id(chunk.metadata["document_id"], chunk.content) for chunk in chunks])
-    assert chunk_ids == [
-        "177a1368-f6a8-0c50-6e92-18677f2c3de3",
-        "bc744db3-1b25-0a9c-cdff-b6ba3df73c36",
-        "f68df25d-d9aa-ab4d-5684-64a233add20d",
-    ]
-
-
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_no_keyword_matches(sqlite_vec_index, sample_chunks, sample_embeddings):
     """Test hybrid search when keyword search returns no matches - should still return vector results."""
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
@@ -194,7 +156,6 @@ async def test_query_chunks_hybrid_no_keyword_matches(sqlite_vec_index, sample_c
     assert all(response.scores[i] >= response.scores[i + 1] for i in range(len(response.scores) - 1))
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_score_threshold(sqlite_vec_index, sample_chunks, sample_embeddings):
     """Test hybrid search with a high score threshold."""
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
@@ -216,7 +177,6 @@ async def test_query_chunks_hybrid_score_threshold(sqlite_vec_index, sample_chun
     assert len(response.chunks) == 0
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_different_embedding(
     sqlite_vec_index, sample_chunks, sample_embeddings, embedding_dimension
 ):
@@ -242,7 +202,6 @@ async def test_query_chunks_hybrid_different_embedding(
     assert all(response.scores[i] >= response.scores[i + 1] for i in range(len(response.scores) - 1))
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_rrf_ranking(sqlite_vec_index, sample_chunks, sample_embeddings):
     """Test that RRF properly combines rankings when documents appear in both search methods."""
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
@@ -267,7 +226,6 @@ async def test_query_chunks_hybrid_rrf_ranking(sqlite_vec_index, sample_chunks, 
     assert all(response.scores[i] >= response.scores[i + 1] for i in range(len(response.scores) - 1))
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_score_selection(sqlite_vec_index, sample_chunks, sample_embeddings):
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
 
@@ -315,7 +273,6 @@ async def test_query_chunks_hybrid_score_selection(sqlite_vec_index, sample_chun
     assert response.scores[0] == pytest.approx(2.0 / 61.0, rel=1e-6)  # Should behave like RRF
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_mixed_results(sqlite_vec_index, sample_chunks, sample_embeddings):
     """Test hybrid search with documents that appear in only one search method."""
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
@@ -339,12 +296,11 @@ async def test_query_chunks_hybrid_mixed_results(sqlite_vec_index, sample_chunks
     # Verify scores are in descending order
     assert all(response.scores[i] >= response.scores[i + 1] for i in range(len(response.scores) - 1))
     # Verify we get results from both the vector-similar document and keyword-matched document
-    doc_ids = {chunk.metadata["document_id"] for chunk in response.chunks}
+    doc_ids = {chunk.metadata.get("document_id") or chunk.chunk_metadata.document_id for chunk in response.chunks}
     assert "document-0" in doc_ids  # From vector search
     assert "document-2" in doc_ids  # From keyword search
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_weighted_reranker_parametrization(
     sqlite_vec_index, sample_chunks, sample_embeddings
 ):
@@ -364,7 +320,11 @@ async def test_query_chunks_hybrid_weighted_reranker_parametrization(
         reranker_params={"alpha": 1.0},
     )
     assert len(response.chunks) > 0  # Should get at least one result
-    assert any("document-0" in chunk.metadata["document_id"] for chunk in response.chunks)
+    assert any(
+        "document-0"
+        in (chunk.metadata.get("document_id") or (chunk.chunk_metadata.document_id if chunk.chunk_metadata else ""))
+        for chunk in response.chunks
+    )
 
     # alpha=0.0 (should behave like pure vector)
     response = await sqlite_vec_index.query_hybrid(
@@ -389,10 +349,13 @@ async def test_query_chunks_hybrid_weighted_reranker_parametrization(
         reranker_params={"alpha": 0.7},
     )
     assert len(response.chunks) > 0  # Should get at least one result
-    assert any("document-0" in chunk.metadata["document_id"] for chunk in response.chunks)
+    assert any(
+        "document-0"
+        in (chunk.metadata.get("document_id") or (chunk.chunk_metadata.document_id if chunk.chunk_metadata else ""))
+        for chunk in response.chunks
+    )
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_rrf_impact_factor(sqlite_vec_index, sample_chunks, sample_embeddings):
     """Test RRFReRanker with different impact factors."""
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
@@ -424,7 +387,6 @@ async def test_query_chunks_hybrid_rrf_impact_factor(sqlite_vec_index, sample_ch
     assert response.scores[0] == pytest.approx(2.0 / 101.0, rel=1e-6)
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_edge_cases(sqlite_vec_index, sample_chunks, sample_embeddings):
     await sqlite_vec_index.add_chunks(sample_chunks, sample_embeddings)
 
@@ -468,7 +430,6 @@ async def test_query_chunks_hybrid_edge_cases(sqlite_vec_index, sample_chunks, s
     assert len(response.chunks) <= 100
 
 
-@pytest.mark.asyncio
 async def test_query_chunks_hybrid_tie_breaking(
     sqlite_vec_index, sample_embeddings, embedding_dimension, tmp_path_factory
 ):

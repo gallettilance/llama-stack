@@ -48,6 +48,9 @@ class ProviderImpl(Providers):
         ret = []
         for api, providers in safe_config.providers.items():
             for p in providers:
+                # Skip providers that are not enabled
+                if p.provider_id is None:
+                    continue
                 ret.append(
                     ProviderInfo(
                         api=api,
@@ -81,7 +84,13 @@ class ProviderImpl(Providers):
                 Each API maps to a dictionary of provider IDs to their health responses.
         """
         providers_health: dict[str, dict[str, HealthResponse]] = {}
-        timeout = 1.0
+
+        # The timeout has to be long enough to allow all the providers to be checked, especially in
+        # the case of the inference router health check since it checks all registered inference
+        # providers.
+        # The timeout must not be equal to the one set by health method for a given implementation,
+        # otherwise we will miss some providers.
+        timeout = 3.0
 
         async def check_provider_health(impl: Any) -> tuple[str, HealthResponse] | None:
             # Skip special implementations (inspect/providers) that don't have provider specs

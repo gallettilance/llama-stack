@@ -4,10 +4,10 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Literal, Protocol, runtime_checkable
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from llama_stack.apis.resource import Resource, ResourceType
 from llama_stack.providers.utils.telemetry.trace_protocol import trace_protocol
@@ -22,7 +22,7 @@ class CommonModelFields(BaseModel):
 
 
 @json_schema_type
-class ModelType(str, Enum):
+class ModelType(StrEnum):
     llm = "llm"
     embedding = "embedding"
 
@@ -36,12 +36,20 @@ class Model(CommonModelFields, Resource):
         return self.identifier
 
     @property
-    def provider_model_id(self) -> str | None:
+    def provider_model_id(self) -> str:
+        assert self.provider_resource_id is not None, "Provider resource ID must be set"
         return self.provider_resource_id
 
     model_config = ConfigDict(protected_namespaces=())
 
     model_type: ModelType = Field(default=ModelType.llm)
+
+    @field_validator("provider_resource_id")
+    @classmethod
+    def validate_provider_resource_id(cls, v):
+        if v is None:
+            raise ValueError("provider_resource_id cannot be None")
+        return v
 
 
 class ModelInput(CommonModelFields):

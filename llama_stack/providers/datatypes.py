@@ -4,7 +4,7 @@
 # This source code is licensed under the terms described in the LICENSE file in
 # the root directory of this source tree.
 
-from enum import Enum
+from enum import StrEnum
 from typing import Any, Protocol
 from urllib.parse import urlparse
 
@@ -141,6 +141,12 @@ Fully-qualified name of the module to import. The module is expected to have:
     provider_data_validator: str | None = Field(
         default=None,
     )
+    description: str | None = Field(
+        default=None,
+        description="""
+A description of the provider. This is used to display in the documentation.
+""",
+    )
 
 
 @json_schema_type
@@ -166,6 +172,12 @@ Fully-qualified name of the module to import. The module is expected to have:
     )
     provider_data_validator: str | None = Field(
         default=None,
+    )
+    description: str | None = Field(
+        default=None,
+        description="""
+A description of the provider. This is used to display in the documentation.
+""",
     )
 
 
@@ -225,7 +237,7 @@ def remote_provider_spec(
     )
 
 
-class HealthStatus(str, Enum):
+class HealthStatus(StrEnum):
     OK = "OK"
     ERROR = "Error"
     NOT_IMPLEMENTED = "Not Implemented"
